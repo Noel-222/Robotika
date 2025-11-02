@@ -3,7 +3,7 @@
 #define motorPinA 5     // PWM pin za upravljanje brzinom motora
 #define motorPinB 6     // pin za smjer (ovdje se koristi kao LOW)
 
-const float IMPULSA_PO_OKRETU = _____;     // broj impulsa po jednom okretu osovine motora (možemo očitati sa odela našeg motora)
+const float IMPULSA_PO_OKRETU = _____;     // broj impulsa po jednom okretu osovine motora (PPR) (možemo očitati u datasheetu motora) npr. 360
 const float PROMJER_KOTACA = ______;          // promjer kotača u centimetrima
 const float OPSEG_KOTACA = 3.1416 * PROMJER_KOTACA; // opseg = π * promjer (udaljenost za 1 okret)
 
