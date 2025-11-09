@@ -111,12 +111,12 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(C1), readEncoder, RISING);
 
   pos = 0;
-  go_advance(SPEED, 4);
+  go_advance(SPEED, 4);    // zadamo motoru da ide naprijed i napravi 4 okretaja
   delay(1000);
   stop_Stop();
   delay(1000);
 
-  go_back(SPEED, 2);
+  go_back(SPEED, 2);    // zadamo motoru da ide nazad i napravi 2 okretaja
   delay(1000);
   stop_Stop();
   delay(1000);
