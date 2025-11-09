@@ -1,9 +1,5 @@
 /*
  * CopyRight www.osoyoo.com
-
-   Uređeni kod.. 
-   Ako želimo koristiti ostale funkcije za skretanje 
-   definiramo drugi motor i uključimo ga na točne pinove
 */
 
 const int pulsesPerRevolution = 565;  // broj impulsa po punom okretaju (OTPRILIKE.. )
