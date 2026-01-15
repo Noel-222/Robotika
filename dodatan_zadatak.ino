@@ -197,6 +197,10 @@ void loop() {
       motorStopL();
       motorStopR();
 
+      /* ============================================================
+                  RESET ENKODERA ( JAKO VAŽNO )
+         ============================================================
+      */
       noInterrupts();
       encoderPosL = 0;
       encoderPosR = 0;
