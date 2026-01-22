@@ -1,0 +1,360 @@
+/*
+ * ===========================================================================
+ * radni file
+ * =========================================================================== 
+ *
+ * https://youtu.be/wazPfdGBeZA?si=EpqwrC12lQNmGUzD
+ * https://github.com/Noel-222/Robotika/blob/main/dodatan_zadatak.ino
+ * https://github.com/Noel-222/Robotika/blob/main/radni_file
+ * 
+ * 
+*/
+
+// IMU
+#include <SparkFunLSM9DS1.h>
+#include "Wire.h"
+
+LSM9DS1 imu;
+
+// 3. ZALIJEPITE SVOJE VRIJEDNOSTI OVDJE
+// (Ovdje treba zalijepiti rezultat kalibracije magnetonetra)
+float magBias[3] = { 305.000000f, 185.500000f, 1095.000000f };
+
+// Postavke ispisa...
+#define PRINT_CALCULATED
+#define PRINT_SPEED 250
+static unsigned long lastPrint = 0;
+
+// 4. ISPRAVAK DEKLINACIJE
+#define DECLINATION 4.8
+
+// --- Pinovi za Lijevog Enkodera ---
+#define ENCODER_L_C1_PIN 18  // Signal A
+#define ENCODER_L_C2_PIN 19  // Signal B
+
+// --- Pinovi za Desnog Enkodera ---
+#define ENCODER_R_C1_PIN 2  // Signal A
+#define ENCODER_R_C2_PIN 3  // Signal B
+
+// --- Pinovi za Lijevog Motora ---
+#define MOTOR_L_EN_PIN 10   // EN (Enable)
+#define MOTOR_L_IN1_PIN 11  // IN1 (Input 1)
+#define MOTOR_L_IN2_PIN 12  // IN2 (Input 2)
+
+// --- Pinovi za Desnog Motora ---
+#define MOTOR_R_EN_PIN 5   // EN (Enable)
+#define MOTOR_R_IN1_PIN 6  // IN1 (Input 1)
+#define MOTOR_R_IN2_PIN 7  // IN2 (Input 2)
+
+// --- Varijable za Enkodere ---
+volatile long encoderPosL = 0;
+volatile long encoderPosR = 0;
+int faza = 1;
+
+// --- Postavke Regulatora ---
+double Kp = 0.5;  // Proporcionalni koeficijent
+int minSpeed = 120;
+int maxSpeed = 255;
+int deadZone = 20;
+
+// =============================
+//      heading varijable
+// =============================
+float heading = 0;
+float targetHeading = 0;
+float headingError = 0;
+float Kp_heading = 2.0;  // koliko jako ispravljamo smjer
+int maxCorrection = 60;  // max razlika brzine kotača
+bool headingSet = false;
+bool useHeadingCorrection = true;  // uključi/isključi korekciju smjera
+
+// =============================
+//           ciljevi
+// =============================
+long targetPosition = -3000;   // FAZA 1
+long targetPositionL = 1070;   // FAZA 2 lijevi motor (okret)
+long targetPositionR = -1020;  // FAZA 2 desni motor (okret)
+long targetPosition3 = -3000;  // FAZA 3
+bool voznjaAktivna = true;
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(MOTOR_L_EN_PIN, OUTPUT);
+  pinMode(MOTOR_L_IN1_PIN, OUTPUT);
+  pinMode(MOTOR_L_IN2_PIN, OUTPUT);
+  pinMode(MOTOR_R_EN_PIN, OUTPUT);
+  pinMode(MOTOR_R_IN1_PIN, OUTPUT);
+  pinMode(MOTOR_R_IN2_PIN, OUTPUT);
+
+  pinMode(ENCODER_L_C1_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_L_C2_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_R_C1_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_R_C2_PIN, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(ENCODER_L_C1_PIN), readEncoderL_A, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_L_C2_PIN), readEncoderL_B, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_R_C1_PIN), readEncoderR_A, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_R_C2_PIN), readEncoderR_B, RISING);
+
+  Wire.begin();
+
+  if (imu.begin() == false) {
+    Serial.println("Failed to communicate with LSM9DS1.");
+    Serial.println("Double-check the wiring!");
+    while (1) { delay(100); }
+  }
+
+  Serial.println("Senzor IMU inicijaliran. Koristim rucnu kalibraciju.");
+  Serial.println("Robot spreman.");
+  delay(2000);
+}
+
+void loop() {
+
+  if (!voznjaAktivna) {
+    motorStopL();
+    motorStopR();
+    return;
+  }
+
+  long trenutnaPozL = encoderPosL;
+  long trenutnaPozR = encoderPosR;
+
+  // =============================
+  // OČITAVANJE IMU i heading kalkulacija
+  // =============================
+
+  // Ako su dostupni podaci s akcelerometra
+  if (imu.accelAvailable()) imu.readAccel();
+
+  // Ako su dostupni podaci s magnetometra.. i primjenjivanje kalibracije
+  if (imu.magAvailable()) {
+    imu.readMag();                  // Očitavanje RAW magnetometar
+    imu.mx -= (int16_t)magBias[0];  // Oduzmanje bias/offset X osi
+    imu.my -= (int16_t)magBias[1];  // Oduzmanje bias/offset Y osi
+    imu.mz -= (int16_t)magBias[2];  // Oduzmanje bias/offset Z osi
+  }
+
+  // prilagođavanje podataka sa IMU-a tako da naprijed na senzoru odgovara stvarnom naprijed robota
+  float mx = -imu.my; 
+  float my = -imu.mx;  
+
+  // Izračun headinga (smjera) u radijanima
+  // atan2 vraća kut u opsegu [-PI, PI]
+  if (my == 0)
+    heading = (mx < 0) ? PI : 0;  // Ako je my = 0, sprječava dijeljenje s nulom
+  else
+    heading = atan2(mx, my);  // izračun kutnog smjera
+
+  // Ispravljanje za magnetsku deklinaciju (lokacija Pazin, Istra)
+  heading -= DECLINATION * PI / 180;
+
+  // Normalizacija kuta u opseg [-PI, PI]
+  if (heading > PI) heading -= (2 * PI);
+  else if (heading < -PI) heading += (2 * PI);
+
+  // Pretvaranje iz radijana u stupnjeve radi lakšeg razumijevanja
+  heading *= 180.0 / PI;
+
+  // Postavljanje referentnog headinga (ciljni heading) za vožnju ravno
+  // FAZA 2 (okret) ignorira heading jer u toj fazi ne koristimo P-korekciju
+  if (!headingSet && (faza == 1 || faza == 3)) {
+    targetHeading = heading;  // Zabilježimo početni heading kao cilj
+    headingSet = true;        // Oznaka da je targetHeading postavljen
+  }
+
+  // =============================
+  // Heading korekcija (P-regulator)
+  // =============================
+  if (useHeadingCorrection) {
+    headingError = heading - targetHeading;  // Koliko smo "iskrenuli" od cilja
+
+    // Normalizacija greške u opseg [-180°, 180°] radi logike P-regulatora
+    if (headingError > 180) headingError -= 360;
+    if (headingError < -180) headingError += 360;
+  } else headingError = 0;  // Ako je heading korekcija isključena (FAZA 2)
+
+  // Izračun korekcije za motore
+  int correction = Kp_heading * headingError;                         // proporcionalni regulator
+  correction = constrain(correction, -maxCorrection, maxCorrection);  // ograničenje na max razliku
+
+  // =============================
+  //  FAZA 1 - vožnja na cilj 1
+  // =============================
+
+  // Osnovna brzina motora prema P-regulatoru pozicije
+  int baseSpeedL = Kp * (targetPosition - trenutnaPozL);
+  int baseSpeedR = Kp * (targetPosition - trenutnaPozR);
+
+  // Ograničavanje brzine unutar minimalne i maksimalne vrijednosti
+  baseSpeedL = constrain(abs(baseSpeedL), minSpeed, maxSpeed);
+  baseSpeedR = constrain(abs(baseSpeedR), minSpeed, maxSpeed);
+
+  // Kombiniranje osnovne brzine i korekcije headinga
+  // Ako robot skrene udesno, lijevi kotač se usporava, desni ubrzava
+  int leftSpeed = baseSpeedL - correction;
+  int rightSpeed = baseSpeedR + correction;
+
+  // Osiguravamo da PWM vrijednosti ostanu u opsegu 0-255
+  leftSpeed = constrain(leftSpeed, 0, 255);
+  rightSpeed = constrain(rightSpeed, 0, 255);
+
+  // Pokretanje motora s izračunatim brzinama
+  motorForwardL(leftSpeed);
+  motorForwardR(rightSpeed);
+
+  // Provjera jesu li oba motora stigla u dead zone cilja
+  bool lijeviStigao = abs(targetPosition - trenutnaPozL) <= deadZone;
+  bool desniStigao = abs(targetPosition - trenutnaPozR) <= deadZone;
+
+  if (lijeviStigao && desniStigao) {
+    Serial.println("--- CILJ 1 DOSEGNUT ---");
+    motorStopL();
+    motorStopR();
+    resetEnkodera()
+    Serial.println("Enkoderi resetirani. Pokrećem FAZU 2...");
+    faza = 2;
+    delay(500);
+  }
+}
+// =============================
+//   FAZA 2 - okret za 90
+// =============================
+else if (faza == 2) {
+  useHeadingCorrection = false;  // isključi heading korekciju
+
+  bool lijeviStigao2 = runMotorP(targetPositionL, trenutnaPozL, motorForwardL, motorReverseL, motorStopL);
+  bool desniStigao2 = runMotorP(targetPositionR, trenutnaPozR, motorForwardR, motorReverseR, motorStopR);
+
+  if (lijeviStigao2 && desniStigao2) {
+    Serial.println("--- CILJ 2 DOSEGNUT ---");
+    motorStopL();
+    motorStopR();
+    resetEnkodera()
+    Serial.println("Enkoderi resetirani. Pokrećem FAZU 3...");
+    faza = 3;
+    headingSet = false;           // reset heading za FAZU 3
+    useHeadingCorrection = true;  // ponovno uključi korekciju
+    delay(500);
+  }
+}
+// =============================
+//  FAZA 3 - voznja na cilj 3
+// =============================
+else if (faza == 3) {
+  int baseSpeedL = Kp * (targetPosition3 - trenutnaPozL);
+  int baseSpeedR = Kp * (targetPosition3 - trenutnaPozR);
+
+  baseSpeedL = constrain(abs(baseSpeedL), minSpeed, maxSpeed);
+  baseSpeedR = constrain(abs(baseSpeedR), minSpeed, maxSpeed);
+
+  int leftSpeed = baseSpeedL - correction;
+  int rightSpeed = baseSpeedR + correction;
+  leftSpeed = constrain(leftSpeed, 0, 255);
+  rightSpeed = constrain(rightSpeed, 0, 255);
+
+  motorForwardL(leftSpeed);
+  motorForwardR(rightSpeed);
+
+  bool lijeviStigao3 = abs(targetPosition3 - trenutnaPozL) <= deadZone;
+  bool desniStigao3 = abs(targetPosition3 - trenutnaPozR) <= deadZone;
+
+  if (lijeviStigao3 && desniStigao3) {
+    Serial.println("--- CILJ 3 DOSEGNUT ---");
+    motorStopL();
+    resetEnkodera()
+    motorStopR();
+    voznjaAktivna = false;
+    return;
+  }
+}
+
+void resetEnkodera() {
+  /* ============================================================
+                  RESET ENKODERA ( JAKO VAŽNO )
+     ============================================================
+      
+       Ako ne resetiramo encodere, drugi P-regulator bi krenuo
+       računati grešku na temelju pozicije od 1. vožnje
+  */
+  noInterrupts();   // Privremeno isključi interapte
+  encoderPosL = 0;  // Oboje postavi na 0
+  encoderPosR = 0;
+  interrupts();  // Vrati interapte
+
+  delay(20);  // Kratka pauza
+}
+
+
+// =============================
+// Ispis headinga
+// =============================
+if ((lastPrint + PRINT_SPEED) < millis()) {
+  Serial.print("Heading: ");
+  Serial.print(heading);
+  Serial.print(" Error: ");
+  Serial.println(headingError);
+  lastPrint = millis();
+}
+}
+
+/*
+ * ===================================================
+ *  --- Funkcije za Upravljanje Motorima (Lijevi) ---
+ * ===================================================
+*/
+void motorForwardL(int pwm) {
+  digitalWrite(MOTOR_L_IN1_PIN, LOW);
+  digitalWrite(MOTOR_L_IN2_PIN, HIGH);
+  analogWrite(MOTOR_L_EN_PIN, pwm);
+}
+void motorReverseL(int pwm) {
+  digitalWrite(MOTOR_L_IN1_PIN, HIGH);
+  digitalWrite(MOTOR_L_IN2_PIN, LOW);
+  analogWrite(MOTOR_L_EN_PIN, pwm);
+}
+void motorStopL() {
+  digitalWrite(MOTOR_L_IN1_PIN, LOW);
+  digitalWrite(MOTOR_L_IN2_PIN, LOW);
+  analogWrite(MOTOR_L_EN_PIN, 0);
+}
+
+/*
+ * ===================================================
+ *  --- Funkcije za Upravljanje Motorima (Desni) ---
+ * ===================================================
+*/
+void motorForwardR(int pwm) {
+  digitalWrite(MOTOR_R_IN1_PIN, HIGH);
+  digitalWrite(MOTOR_R_IN2_PIN, LOW);
+  analogWrite(MOTOR_R_EN_PIN, pwm);
+}
+void motorReverseR(int pwm) {
+  digitalWrite(MOTOR_R_IN1_PIN, LOW);
+  digitalWrite(MOTOR_R_IN2_PIN, HIGH);
+  analogWrite(MOTOR_R_EN_PIN, pwm);
+}
+void motorStopR() {
+  digitalWrite(MOTOR_R_IN1_PIN, LOW);
+  digitalWrite(MOTOR_R_IN2_PIN, LOW);
+  analogWrite(MOTOR_R_EN_PIN, 0);
+}
+
+// --- ISR ---
+void readEncoderL_A() {
+  if (digitalRead(ENCODER_L_C2_PIN) == LOW) encoderPosL++;
+  else encoderPosL--;
+}
+void readEncoderL_B() {
+  if (digitalRead(ENCODER_L_C1_PIN) == HIGH) encoderPosL++;
+  else encoderPosL--;
+}
+void readEncoderR_A() {
+  if (digitalRead(ENCODER_R_C2_PIN) == LOW) encoderPosR--;
+  else encoderPosR++;
+}
+void readEncoderR_B() {
+  if (digitalRead(ENCODER_R_C1_PIN) == HIGH) encoderPosR--;
+  else encoderPosR++;
+}
