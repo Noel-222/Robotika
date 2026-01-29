@@ -28,9 +28,6 @@
               - enkoderi se ne koriste
               - motori se okreću u suprotnom smjeru istom brzinom
 
-              pratiLiniju()
-              - robot prati liniju pomoću senzora za liniju
-              - koristiti PID regulaciju
 
               upgrade
               skreni (int stupanj, int radijus)
