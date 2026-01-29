@@ -1,0 +1,326 @@
+/*
+   ======================================================================================
+   ZADATAK: Implementacija metoda voziNaprijed() i skreni() koristeći LSM9DS1 i enkodere
+   ======================================================================================
+*/
+
+#include <SparkFunLSM9DS1.h>
+#include <Wire.h>
+
+/* =========================
+           PINOVI
+   =========================
+*/
+
+//  pinovi za Lijevog Enkodera (Interrupt pinovi)
+#define ENCODER_L_C1_PIN 18  // Signal A odnosno zuta zica
+#define ENCODER_L_C2_PIN 19  // Signal B, zelena zicac
+
+// pinovi za Desnog Enkodera 
+#define ENCODER_R_C1_PIN 2  // Signal A zuta zica
+#define ENCODER_R_C2_PIN 3  // Signal B zelena zica
+
+// pinovi za Lijevog Motora
+#define MOTOR_L_EN_PIN 10   // EN pin ( PWM za brzinu )
+#define MOTOR_L_IN1_PIN 11  // IN1 ( input 1 )
+#define MOTOR_L_IN2_PIN 12  // IN1 ( input 2 )
+
+// pinovi za Desnog Motora
+#define MOTOR_R_EN_PIN 5   // EN pin za desni
+#define MOTOR_R_IN1_PIN 6  // IN1 ( input 1 )
+#define MOTOR_R_IN2_PIN 7  // IN2 ( input 2 )
+
+/* ==========================================
+         IMU POSTAVKE I VARIJABLE
+   ==========================================      
+*/
+
+LSM9DS1 imu;
+
+// ručna kalibracija magnetometra (zalijepljeno iz rezultata kalibracije)
+float magBias[3] = { 305.000000f, 185.500000f, 1095.000000f };
+
+// Magnetska deklinacija (Pazin, Istra)
+#define DECLINATION 4.8
+
+// globalne varijable za orijentaciju
+float heading = 0;  // najbitnija varijabla.. predstavlja kutnu orijentaciju robota u odnosu na neku fiksnu točku
+float targetHeading = 0;
+float headingError = 0;
+float Kp_heading = 2.5;  // faktor ispravljanja (P-regulator)
+int maxCorrection = 60;  // maksimalni utjecaj korekcije na PWM
+
+/* ==========================================
+            ENKODER VARIJABLE
+   ==========================================
+*/
+volatile long encoderPosL = 0;
+volatile long encoderPosR = 0;
+
+// konstanta za pretvorbu impulsa u centimetre
+// (potrebno kalibrirati)
+const float TICKS_PER_CM = 50.0;
+
+/* ==========================================
+           POMOĆNE FUNKCIJE ZA MOTORE
+   ==========================================
+*/
+
+// funkcija za kretanje lijevog motora naprijed
+void motorForwardL(int pwm) {
+  digitalWrite(MOTOR_L_IN1_PIN, LOW);
+  digitalWrite(MOTOR_L_IN2_PIN, HIGH);
+  analogWrite(MOTOR_L_EN_PIN, pwm);
+}
+
+// funkcija za kretanje desnog motora naprijed
+void motorForwardR(int pwm) {
+  digitalWrite(MOTOR_R_IN1_PIN, HIGH);
+  digitalWrite(MOTOR_R_IN2_PIN, LOW);
+  analogWrite(MOTOR_R_EN_PIN, pwm);
+}
+
+// funkcija za kretanje lijevog motora unatrag (kod okreta)
+void motorReverseL(int pwm) {
+  digitalWrite(MOTOR_L_IN1_PIN, HIGH);
+  digitalWrite(MOTOR_L_IN2_PIN, LOW);
+  analogWrite(MOTOR_L_EN_PIN, pwm);
+}
+
+// funkcija za kretanje desnog motora unatrag (kod okreta)
+void motorReverseR(int pwm) {
+  digitalWrite(MOTOR_R_IN1_PIN, LOW);
+  digitalWrite(MOTOR_R_IN2_PIN, HIGH);
+  analogWrite(MOTOR_R_EN_PIN, pwm);
+}
+
+// potpuno zaustavljanje svih motora
+void motorStop() {
+  digitalWrite(MOTOR_L_IN1_PIN, LOW);
+  digitalWrite(MOTOR_L_IN2_PIN, LOW);
+  digitalWrite(MOTOR_R_IN1_PIN, LOW);
+  digitalWrite(MOTOR_R_IN2_PIN, LOW);
+  analogWrite(MOTOR_L_EN_PIN, 0);
+  analogWrite(MOTOR_R_EN_PIN, 0);
+}
+
+/* ==========================================
+           LOGIKA ZA HEADING
+  ==========================================
+*/
+
+
+float updateHeading() {
+  if (imu.magAvailable()) {
+    imu.readMag();
+    // primjena kalibracije i usklađivanje osi senzora s robotom
+    float mx = -(imu.my - magBias[1]);
+    float my = -(imu.mx - magBias[0]);
+
+    // izračun headinga
+    // provjeravamo je li komponenta "my" nula kako bismo izbjegli grešku dijeljenja s nulom
+    if (my == 0) {
+      // ako je my=0 kut može biti samo 180 stupnjeva PI ili 0
+      // mx < 0 znači da robot gleda unatrag u odnosu na magnetski pol
+      heading = (mx < 0) ? PI : 0;
+    } else {
+      // atan2 je funkcija koja izračunava kut na temelju X i Y koordinata
+      // ona automatski prepoznaje u kojem se kvadrantu robot nalazi (sjeveroistok, jugozapad...)
+      heading = atan2(mx, my);
+    }
+
+    // magnetski sjever (gdje gleda igla kompasa) i pravi zemljopisni sjever nisu na istom mjestu
+    // ovdje oduzimamo razliku (deklinaciju) za lokaciju (npr. Pazin) kako bi robot bio precizniji
+    // formula: kut_u_radijanima = stupnjevi * (PI / 180)
+    heading -= DECLINATION * PI / 180;
+
+    // nakon što oduzmemo deklinaciju, kut može ispasti iz logičkog raspona (npr. postati 370° ili -190°)
+    // zelimo da heading uvijek bude između -PI -180° i +PI +180°
+
+    // ako je kut veći od 180 stupnjeva PI, oduzmi puni krug 2*PI da dobiješ ekvivalentnu manju vrijednost
+    if (heading > PI) {
+      heading -= (2 * PI);
+    }
+    // ako je kut manji od -180 stupnjeva (-PI), dodaj puni krug (2*PI)
+    else if (heading < -PI) {
+      heading += (2 * PI);
+    }
+
+    // --- PRETVORBA IZ RADIJANA U STUPNJEVE ---
+    // mikrokontroleri računaju u radijanima, ali nama je lakše raditi sa stupnjevima (0-360)
+    // množimo s (180 / PI) kako bismo dobili konačnu vrijednost koju ispisujemo na serial monitor
+    heading *= 180.0 / PI;
+  }
+  return heading;
+}
+
+/* ===================================
+           GLAVNE FUNkCiJE
+   ===================================
+*/
+
+/*
+ Metoda: voziNaprijed
+*/
+void voziNaprijed(int duljina) {
+  // 1. resetiraj enkodere (JAKO. VAZNO.) i postavi ciljni smjer
+  noInterrupts();
+  encoderPosL = 0;
+  encoderPosR = 0;
+  interrupts();
+
+  targetHeading = updateHeading();  // Zapamti trenutni smjer kao "ravno"
+  long targetTicks = duljina * TICKS_PER_CM;
+
+  Serial.print("Krecem naprijed za (cm): ");
+  Serial.println(duljina);
+
+  // 2. petlja kretanja dok ne dostignemo broj impulsa
+  while (abs(encoderPosL) < targetTicks) {
+    float currentHeading = updateHeading();
+
+    // izračun greške kuta (koliko smo skrenuli s pravca)
+    headingError = currentHeading - targetHeading;
+    if (headingError > 180) headingError -= 360;
+    else if (headingError < -180) headingError += 360;
+
+    // P-Regulator korekcije
+    int correction = headingError * Kp_heading;
+    correction = constrain(correction, -maxCorrection, maxCorrection);
+
+    // motori: bazna brzina 150 + ili - korekcija ovisno o strani
+    int leftSpeed = constrain(150 - correction, 0, 255);
+    int rightSpeed = constrain(150 + correction, 0, 255);
+
+    motorForwardL(leftSpeed);
+    motorForwardR(rightSpeed);
+
+    // povremeni ispis u serial radi debugiranja
+    static unsigned long lastPrint = 0;
+    if (millis() - lastPrint > 200) {
+      Serial.print("Put: ");
+      Serial.print(abs(encoderPosL) / TICKS_PER_CM);
+      Serial.print(" cm | Error: ");
+      Serial.println(headingError);
+      lastPrint = millis();
+    }
+  }
+
+  motorStop(); 
+  Serial.println("--- cilj dosegnut ---");
+}
+
+/**
+  Metoda: skreni
+ */
+void skreni(int stupanj) {
+  float startHeading = updateHeading();
+  float finalTarget = startHeading + stupanj;
+
+  // normalizacija ciljnog kuta
+  if (finalTarget > 180) finalTarget -= 360;
+  else if (finalTarget < -180) finalTarget += 360;
+
+  Serial.print("Skrecem na kut: ");
+  Serial.println(finalTarget);
+
+  bool stigao = false;
+  while (!stigao) {
+    float currentHeading = updateHeading();
+    float error = finalTarget - currentHeading;
+
+    // normalizacija greške
+    if (error > 180) error -= 360;
+    else if (error < -180) error += 360;
+
+    // ako je greška manja od 3 stupnja, stani
+    if (abs(error) < 3) {
+      stigao = true;
+    } else {
+      // ako je error pozitivan, cilj je "udesno" od nas
+      if (error > 0) {
+        motorForwardL(130);  // Okret u mjestu (desno)
+        motorReverseR(130);
+      } else {
+        motorReverseL(130);  // Okret u mjestu (lijevo)
+        motorForwardR(130);
+      }
+    }
+  }
+  motorStop();
+  Serial.println("--- skretanje zavrseno ---");
+}
+
+/* ==========================================
+       ISR (PREKIDNE RUTINE) ENKODERA
+   ==========================================
+*/
+
+void readEncoderL_A() {
+  if (digitalRead(ENCODER_L_C2_PIN) == LOW) encoderPosL++;
+  else encoderPosL--;
+}
+void readEncoderL_B() {
+  if (digitalRead(ENCODER_L_C1_PIN) == HIGH) encoderPosL++;
+  else encoderPosL--;
+}
+void readEncoderR_A() {
+  if (digitalRead(ENCODER_R_C2_PIN) == LOW) encoderPosR--;
+  else encoderPosR++;
+}
+void readEncoderR_B() {
+  if (digitalRead(ENCODER_R_C1_PIN) == HIGH) encoderPosR--;
+  else encoderPosR++;
+}
+
+/* ==========================================
+          MAIN SETUP I LOOP
+   ==========================================
+*/
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+
+  // konfiguracija motor pinova
+  pinMode(MOTOR_L_EN_PIN, OUTPUT);
+  pinMode(MOTOR_L_IN1_PIN, OUTPUT);
+  pinMode(MOTOR_L_IN2_PIN, OUTPUT);
+  pinMode(MOTOR_R_EN_PIN, OUTPUT);
+  pinMode(MOTOR_R_IN1_PIN, OUTPUT);
+  pinMode(MOTOR_R_IN2_PIN, OUTPUT);
+
+  // konfiguracija enkoder pinova
+  pinMode(ENCODER_L_C1_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_L_C2_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_R_C1_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_R_C2_PIN, INPUT_PULLUP);
+
+  // aktiviranje interrupta
+  attachInterrupt(digitalPinToInterrupt(ENCODER_L_C1_PIN), readEncoderL_A, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_L_C2_PIN), readEncoderL_B, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_R_C1_PIN), readEncoderR_A, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_R_C2_PIN), readEncoderR_B, RISING);
+
+  // inicijalizacija IMU senzora
+  if (imu.begin() == false) {
+    Serial.println("GRESKA: LSM9DS1 nije pronaden!");
+    while (1)
+      ;
+  }
+  
+  Serial.println("Senzor IMU inicijaliran. Koristim rucnu kalibraciju.");
+  Serial.println("Robot je spreman!");
+  delay(3000);  // pauza od 3 sekunde prije pocetka voznje
+
+  /* --- TESTNI SCENARI ---
+  voziNaprijed(100);  // Vozi ravno 1 metar
+  delay(1000);
+  skreni(90);  // Okreni se za 90 stupnjeva udesno
+  delay(1000);
+  voziNaprijed(50);  // Vozi još 50 cm u novom smjeru
+  */
+}
+
+void loop() {
+          // LOOPP
+}
